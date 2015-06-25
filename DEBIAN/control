@@ -1,0 +1,10 @@
+Package: cstbox-ext-mqtt
+Version: 1.0.0
+Section: base
+Priority: optional
+Architecture: all
+Depends: cstbox-core, paho-mqtt
+Maintainer: Eric Pascual <eric.pascual@cstb.fr>
+Description: CSTBox MQTT gateway
+    This package adds a gateway between the CSTBox internal message bus and
+    an external MQTT one.
