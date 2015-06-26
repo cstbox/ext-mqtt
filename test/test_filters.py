@@ -11,20 +11,19 @@ from paho.mqtt.client import MQTTMessage
 from pycstbox.mqtt.core import REOutboundFilter, REInboundFilter
 from pycstbox.log import getLogger, DEBUG
 from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL
-from pycstbox.events import DataKeys
 
 
 _DEBUG_LOG = True
 
 class _BaseTestCase(unittest.TestCase):
     def setUp(self):
-        self._logger = getLogger(self._testMethodName)
+        self._logger = getLogger(self.__class__.__name__ + '.' + self._testMethodName)
         if _DEBUG_LOG:
             self._logger.setLevel(DEBUG)
-        self._logger.debug('--------- started')
+        self._logger.debug('started')
 
     def tearDown(self):
-        self._logger.debug('--------- ended')
+        self._logger.debug('ended')
 
 
 class REOutboundFilterTestCase(_BaseTestCase):
@@ -115,8 +114,8 @@ class REInboundFilterTestCase(_BaseTestCase):
         """ Checks that valid rules are all accepted.
         """
         f = REInboundFilter([
-            (r'/switch/bedroom', [('switch', 'bedroom', CONTROL_EVENT_CHANNEL)]),
-            (r'/switch/(?P<which>[a-z0-9]+)', [('switch', '%(which)s')]),
+            (r'/dim/bedroom', [('dim', 'bedroom', CONTROL_EVENT_CHANNEL)]),
+            (r'/dim/(?P<which>[a-z0-9]+)', [('dim', '%(which)s')]),
         ], self._logger)
         self.assertEqual(len(f._rules), 2)
 
@@ -131,7 +130,7 @@ class REInboundFilterTestCase(_BaseTestCase):
         """ Checks valid rules with multiple events dispatch.
         """
         f = REInboundFilter([
-            (r'/switch/all', [('switch', 'bedroom'), ('switch', 'living')]),
+            (r'/dim/all', [('dim', 'bedroom'), ('dim', 'living')]),
         ], self._logger)
         self.assertEqual(len(f._rules), 1)
         _, dispatch = f._rules[0]
@@ -144,7 +143,7 @@ class REInboundFilterTestCase(_BaseTestCase):
         """ Checks acceptance of rules with an empty events dispatch.
         """
         f = REInboundFilter([
-            (r'/switch/all', []),
+            (r'/dim/all', []),
         ], self._logger)
         self.assertEqual(len(f._rules), 0)
 
@@ -153,23 +152,23 @@ class REInboundFilterTestCase(_BaseTestCase):
         """
         with self.assertRaisesRegexp(ValueError, r'^missing regex .*'):
             REInboundFilter([
-                ('', [('switch', 'bedroom', CONTROL_EVENT_CHANNEL)])
+                ('', [('dim', 'bedroom', CONTROL_EVENT_CHANNEL)])
             ], self._logger)
         with self.assertRaisesRegexp(ValueError, r'^invalid regex .*'):
             REInboundFilter([
-                (r'(<foo', [('switch', 'bedroom', CONTROL_EVENT_CHANNEL)])
+                (r'(<foo', [('dim', 'bedroom', CONTROL_EVENT_CHANNEL)])
             ], self._logger)
         with self.assertRaisesRegexp(ValueError, r'^parameters not found .*(foo)'):
             REInboundFilter([
-                (r'(?P<bar>[a-z0-9]+)', [('switch', '%(foo)s')])
+                (r'(?P<bar>[a-z0-9]+)', [('dim', '%(foo)s')])
             ], self._logger)
 
     def test_03a_filtering_not_impl(self):
         f = REInboundFilter([
-            (r'/switch/all', [('switch', 'bedroom'), ('switch', 'living')]),
+            (r'/dim/all', [('dim', 'bedroom'), ('switch', 'living')]),
         ], self._logger)
         mqtt_message = MQTTMessage()
-        mqtt_message.topic = '/switch/all'
+        mqtt_message.topic = '/dim/all'
 
         with self.assertRaises(NotImplementedError):
             # if we get the exception, it means we have passed all the steps
@@ -178,22 +177,54 @@ class REInboundFilterTestCase(_BaseTestCase):
     def test_03b_filtering_impl(self):
         class RealFilter(REInboundFilter):
             def make_event_payload(self, client, user_data, message, var_type, var_name):
-                status = message.payload
+                if var_type == 'dim':
+                    status = message.payload
+                else:
+                    status = bool(message.payload)
                 return status, None
 
         f = RealFilter([
-            (r'/switch/all', [('switch', 'bedroom'), ('switch', 'living')]),
+            (r'/dim/all', [('dim', 'bedroom'), ('switch', 'living')]),
+            (r'/dim/(?P<what>[a-z0-9]+)', [('dim', '%(what)s')]),
         ], self._logger)
 
         mqtt_message = MQTTMessage()
-        mqtt_message.topic = '/switch/all'
-        mqtt_message.payload = True
+        mqtt_message.topic = '/dim/all'
+        mqtt_message.payload = 50
 
         events = f.accept_event(None, None, mqtt_message)
         self.assertEqual(len(events), 2)
         for evt, channel in events:
-            self.assertTrue(evt.data)
             self.assertEqual(channel, CONTROL_EVENT_CHANNEL)
+            if evt.var_type == 'dim':
+                self.assertEqual(evt.value, 50)
+            else:
+                self.assertEqual(evt.value, True)
+
+        mqtt_message.payload = 0
+        events = f.accept_event(None, None, mqtt_message)
+        for evt, channel in events:
+            if evt.var_type == 'dim':
+                self.assertEqual(evt.value, 0)
+            else:
+                self.assertEqual(evt.value, False)
+
+        mqtt_message = MQTTMessage()
+        mqtt_message.topic = '/dim/bedroom'
+        mqtt_message.payload = 50
+
+        events = f.accept_event(None, None, mqtt_message)
+        self.assertEqual(len(events), 1)
+        event, channel = events[0]
+        self.assertEqual(event.value, 50)
+
+        mqtt_message = MQTTMessage()
+        mqtt_message.topic = '/open/door'
+        mqtt_message.payload = True
+
+        events = f.accept_event(None, None, mqtt_message)
+        self.assertEqual(len(events), 0)
+
 
 if __name__ == '__main__':
     # disable detailed trace when running as a script

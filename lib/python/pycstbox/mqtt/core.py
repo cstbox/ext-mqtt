@@ -345,8 +345,10 @@ class REInboundFilter(InboundFilter):
                     value, extra_info = self.make_event_payload(client, user_data, message, var_type, var_name)
                     event = make_basic_event(var_type, var_name, value, **(extra_info or {}))
                     result.append((event, channel))
+                # ignore the other rules
+                return result
 
-        return result
+        return []
 
     def make_event_payload(self, client, user_data, message, var_type, var_name):
         """ Returns the event payload of the CSTBox event to be produced, based on the content of the incoming
@@ -493,10 +495,13 @@ class REOutboundFilter(OutboundFilter):
 
 
 class MQTTGatewayError(Exception):
-    pass
+    """ Root exception for package ones.
+    """
 
 class MQTTConnectionError(MQTTGatewayError):
-    pass
+    """ Risen when we cannot connect to the broker.
+    """
 
 class MQTTNotConnectedError(MQTTGatewayError):
-    pass
+    """ Risen when the requested operation cannot be done because no connection to the broker.
+    """
