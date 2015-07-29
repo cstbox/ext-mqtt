@@ -21,24 +21,23 @@ This gateway is basically based on the :py:class:`MQTTConnector` class, which
 wraps the connection with the MQTT broken in a convenient way, and offers the proper
 extension points for assembling the complete gateway.
 """
+from pycstbox.mqtt.errors import MQTTConnectionError, MQTTNotConnectedError, ConfigurationError
 
 __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
 __all__ = [
     'MQTTConnector',
-    'MQTTConnectionError', 'MQTTNotConnectedError',
-    'InboundFilter', 'OutboundFilter',
-    'REInboundFilter', 'REOutboundFilter'
+    'InboundAdapter', 'OutboundAdapter'
 ]
 
 import time
-import re
-
-from pycstbox.log import DummyLogger, DEBUG
-from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL
-from pycstbox.events import make_basic_event
+import inspect
 
 from paho.mqtt import client as mqtt_client
+
+from pycstbox.log import DummyLogger
+from pycstbox.sysutils import symbol_for_name
+from .config import Configurable, CFG_ADAPTER_CLASS, CFG_DEFAULT_BUILDER
 
 
 class MQTTConnector(object):
@@ -49,7 +48,10 @@ class MQTTConnector(object):
     """
     STATUS_DISCONNECTED, STATUS_CONNECTED, STATUS_ERROR = range(3)
 
-    def __init__(self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, topics=None, logger=None):
+    def __init__(
+            self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, topics=None,
+            logger=None
+    ):
         """
         :param str broker: the broker server public name or IP
         :param int port: the server connection port
@@ -196,184 +198,128 @@ class MQTTConnector(object):
             self._logger.warning('not currently active')
 
 
-def _replace_parms(s, d):
-    try:
-        return s % d
-    except TypeError:
-        # these was no replaceable parameter
-        return s
+class ConfigurableAdapter(Configurable):
+    """ Base class for any type of configurable adapter, handling shared configuration processing
+
+    Derived classes must implement the :py:meth:`_configure` method to provide their specific
+    configuration handling, which is invoked at the end of the shared processing.
+    """
+    def configure(self, cfg):
+        """ Processes and applies the adapter specific configuration.
+
+        This method handles shared configuration process, and then delegates to :py:meth:`_configure`
+        for the rest of the process.
+
+        The configuration data is expected to contain at least the following key:
+
+            class_name:
+                the fully qualified name of the class implementing the adapter
+
+        This key is used here to check that the instance matches the configuration. The rest of
+        the content depends on the concrete class.
+
+        If specified, the default payload builder class is resolved, and the dictionary entry containing
+        its name is replace by the class itself.
+
+        :param dict cfg: the configuration data
+        :raises ConfigurationError: if the configuration is not valid
+        """
+        # sanity check : does the class specified in the configuration match with ours ?
+
+        # use a generalised comparison, able to deal with classes FQN as well as with classes directly
+        cfg_class = cfg[CFG_ADAPTER_CLASS]
+        my_class = self.__class__ if inspect.isclass(cfg_class) else self.__module__ + '.' + self.__class__.__name__
+
+        if my_class != cfg_class:
+            msg = 'class type mismatch (%s != %s)' % (my_class, cfg_class)
+            self.logger.error(msg)
+            raise ConfigurationError(msg)
+
+        # resolve the default builder if here
+        try:
+            fqn = cfg[CFG_DEFAULT_BUILDER]
+            cfg[CFG_DEFAULT_BUILDER] = self.resolve_builder(fqn)
+        except KeyError:
+            pass
+
+        self._configure(cfg)
+
+    def resolve_builder(self, fqn):
+        # short-circuit the case where the resolution has already been done
+        if inspect.isclass(fqn):
+            return fqn
+
+        try:
+            builder = symbol_for_name(fqn)
+        except (ImportError, NameError) as e:
+            raise ConfigurationError('builder not found: %s' % fqn)
+        except Exception as e:
+            raise ConfigurationError("error resolving %s: %s" % (fqn, e))
+        else:
+            if not callable(builder):
+                raise ConfigurationError("builder is not callable (%s)" % fqn)
+
+            args, _, _, _ = inspect.getargspec(builder)
+            if len(args) != 4:
+                raise ConfigurationError('builder signature mismatch (%s)' % fqn)
+
+            return builder
+
+    def _configure(self, cfg):
+        """ Sub-classes specific configuration process.
+
+        To be overridden by sub-classes, since this implementation does nothing.
+
+        :param dict cfg: the configuration data
+        """
 
 
-class InboundFilter(object):
-    """ Prototype of the filter for incoming messages.
+class InboundAdapter(ConfigurableAdapter):
+    """ Base class for implementing adapters for incoming MQTT messages.
 
-    Its role is to define how messages received from the MQTT domain are accepted, and
-    for those which are, translated into messages injected in the CSTBox domain.
+    Its role is to translate CSTBox events into corresponding MQTT messages.
 
     .. IMPORTANT::
 
-        The default implementation accept nothing by security. It has to be sub-classed by
-        the application.
-    """
-    def accept_event(self, client, user_data, message):
-        """ Tells if an incoming MQTT event is to be published on the CSTBox bus.
+        To be sub-classed, since the default implementation discards incoming MQTT messages.
 
-        The method returns the corresponding CSTBox event(s) which must be published on CSTBox
+    """
+    _mqtt_subscr_list = []
+
+    def handle_message(self, client, user_data, message):
+        """ A generator yielding CSTBox events to be emitted corresponding to the passed MQTT message.
+
+        The generator yields the corresponding CSTBox event(s) which must be published on CSTBox
         message bus in case the MQTT event is accepted, and the target channel for each one.
-        The return events are either instances of :py:class:`pycstbox.events.BasicEvent` or
-        the equivalent tuples (see class definition for their attributes). To ensure the consistency
-        of the time line, the CSTBox events will be dated by the event manager at publication time.
-        Consequently, the time stamp included in the MQTT message will be discarded.
 
-        The method result is an iterable of tuples, each one containing the event and the name of the
-        channel on which it must be published.
+        The returned events are either instances of :py:class:`BasicEvent` or the equivalent tuples
+        (see class definition for their attributes). To ensure the consistency of the time line, the CSTBox events
+        will be dated by the event manager at publication time. Consequently, the time stamp included in
+        the MQTT message will be discarded.
 
-        If the incoming MQTT event is not accepted, the method must return None or an empty list.
+        The generator must return nothing for discarding the incoming MQTT event.
 
-        :param client: the MQTT client instance
-        :param user_data: application specific data which can be attached to the client
+        :param client: the MQTT client
+        :param user_data: application dependant user data transmitted by the caller
         :param message: the MQTT message
-        :return: the list of CSTBox events to be published
-        :rtype: iterable of (CSTBox event, channel name) tuples
+        :return: CSTBox events and associated channel
+        :rtype: tuple
         """
-        return []
+        return
 
+    def get_listened_topics(self):
+        """ Returns the list of MQTT topics to be subscribed to.
 
-class REInboundFilter(InboundFilter):
-    """ Regular expressions based inbound filter.
+        The default implementation returns an empty list, equivalent to accept no MQTT message.
 
-    It is based on regex based rules applied to the message topic, which give in return the variable
-    type and variable name of the message to be emitted, with the channel on which this must be done.
-
-    .. IMPORTANT:
-
-        Since there is no way to define a generic method for extracting the event payload from the MQTT message,
-        this is delegated to the :py:meth:`make_event_payload` abstract method which must be implemented
-        by the real inbound filter.
-    """
-    def __init__(self, rules, logger=None):
-        """ Initializes the rules list by compiling their specifications.
-
-        The specifications are provided as an iterable of tuples, which items are :
-
-            - a string containing the regex to be applied to the MQTT message topic
-            - an events dispatch list, composed of tuples specifying each of the corresponding CSTBox events
-              to be produced. Each tuple is composed of :
-
-                - the variable type
-                - the variable name
-                - the channel on which the event will be emitted. If omitted, it is defaulted to
-                  :py:attr:`pycstbox.evtmgr.CONTROL_EVENT_CHANNEL`
-
-              Using an empty dispatch list is allowed, which is equivalent to block the incoming message.
-              This can be useful for dynamically dispatch strategies, so that the rule can be left in place but will
-              produce no CSTBox event in result to the matching MQTT message.
-
-        :param rules: an iterable of tuples, as described above
-        :param logger: optional logging object
-        :raises ValueError: if invalid regex, or if the topic format contains replaceable parameters
-            not found in the regex
+        :return: the list of topics
+        :rtype: list
         """
-        self._logger = logger or DummyLogger()
-        fmt_parms_re = re.compile(r'%\(([a-zA-Z0-9]+)\)[sfdx]')
-
-        # cache for speeding up computations
-        self._cache = {}
-
-        # filtering and transformation transformation rules
-        self._rules = []
-
-        for s_regex, dispatch in rules:
-            # ignore empty dispatch lists which can be used for explicitly block an incoming message
-            if not dispatch:
-                continue
-
-            s_regex = s_regex.strip() if s_regex else None
-            if not s_regex:
-                raise ValueError('missing regex in rule')
-
-            try:
-                # compile the regex => ths will checks its syntax
-                pattern = re.compile(s_regex)
-            except re.error as e:
-                raise ValueError('invalid regex (%s) : %s' % (s_regex, e))
-
-            rule_event_specs = []
-            for evt_specs in dispatch :
-                var_type, var_name, channel = (evt_specs + (CONTROL_EVENT_CHANNEL,))[:3]
-                # clean all strings
-                var_type, var_name, channel = t = tuple(
-                    s.strip() if s else None for s in (var_type, var_name, channel)
-                )
-
-                # checks that the rule is fully specified
-                if not all(t):
-                    raise ValueError("invalid event specification (var_type='%s'/var_name='%s'/channel='%s')" % t)
-
-                # checks that replaceable parameters in variable type and name are all present
-                # in the captured groups of the rule
-                for fmt in var_type, var_name:
-                    missing = set(fmt_parms_re.findall(fmt)) - set(pattern.groupindex.keys())
-                    if missing:
-                        raise ValueError('parameters not found in rule regex (%s)' % ', '.join(missing))
-
-                # all is correct => register the event specification
-                rule_event_specs.append(t)
-
-            # the rule is valid => we can register it
-            self._rules.append((pattern, rule_event_specs))
-
-    def dump_rules(self):
-        self._logger.debug('Filtering rules :')
-        for regex, dispatch in self._rules:
-            self._logger.debug('- %s -> %s' % (regex.pattern, dispatch))
-
-    def accept_event(self, client, user_data, message):
-        result = []
-
-        mqtt_topic = message.topic
-        for regex, dispatch in self._rules:
-            r = regex.match(mqtt_topic)
-            if r:
-                gd = r.groupdict
-                for evt_specs in dispatch:
-                    var_type, var_name, channel = (evt_specs + (CONTROL_EVENT_CHANNEL,))[:3]
-                    # expand templates with captured groups
-                    var_type = _replace_parms(var_type, gd)
-                    var_name = _replace_parms(var_name, gd)
-
-                    value, extra_info = self.make_event_payload(client, user_data, message, var_type, var_name)
-                    event = make_basic_event(var_type, var_name, value, **(extra_info or {}))
-                    result.append((event, channel))
-                # ignore the other rules
-                return result
-
-        return []
-
-    def make_event_payload(self, client, user_data, message, var_type, var_name):
-        """ Returns the event payload of the CSTBox event to be produced, based on the content of the incoming
-        MQTT message.
-
-        To make things easier for implementors, the result is expected as a tuple, which first item is the value,
-        and the second an optional dictionary of additional information. The effective event payload will be built
-        by the framework, by assembling these two pieces of data.
-
-        This method is called by :py:meth:`accept_event` when a rule matches and corresponding variable
-        type and name could thus have been determined.
-
-        :param client: the MQTT client instance
-        :param user_data: application specific data which can be attached to the client
-        :param message: the MQTT message
-        :param str var_type: the variable type of the CSTBox event
-        :param str var_name: the variable name of the CSTBox event
-        :return: the value and optional additional information to be used for the CSTBox event
-        :type: tuple
-        """
-        raise NotImplementedError()
+        return self._mqtt_subscr_list
 
 
-class OutboundFilter(object):
-    """ Prototype of the filter for outgoing messages.
+class OutboundAdapter(ConfigurableAdapter):
+    """ Base class for implementing adapters for outgoing CSTBox events.
 
     Its role is to define if a given CSTBox message can be published on the MQTT domain,
     and in this case which is the relevant MQTT topic to be used.
@@ -383,125 +329,19 @@ class OutboundFilter(object):
         To be sub-classed, since the default implementation forbid any event
         to go outside of the CSTBox domain.
     """
-    def get_mqtt_topic(self, timestamp, var_type, var_name, data):
-        """ Returns the MQTT topic conforming the broker conventions and corresponding to the CSTBox
+    def handle_event(self, timestamp, channel, var_type, var_name, data):
+        """ Returns the MQTT topic and payload, conforming the broker conventions and corresponding to the CSTBox
         candidate message.
 
-        Return None if the message is not to be passed to the MQTT world (which is the behaviour if the
+        Return None if the message is not to be passed to the MQTT world (which is the behaviour of the
         default implementation).
 
         :param int timestamp: the event time stamp
+        :param str channel: the event channel
         :param str var_type: the type of the variable the event is related to
         :param str var_name: the name of the variable
         :param dict data: the event specific payload
-        :return: the MQTT topic to be used, or None if the message is not allowed to go outside
-        :rtype: str or None
+        :return: the MQTT topic and payload to be used, or None if the message is not allowed to go outside
+        :rtype: tuple
         """
         return None
-
-
-class REOutboundFilter(OutboundFilter):
-    """ Regular expressions based outbound filter.
-
-    It is based on regex based rules, applied to the variable type and variable name,
-    which give the MQTT topic to be used for publication. If no matching is found, the message
-    is not published.
-
-    The rules are applied in the sequence defined by the rules table, by checking if the compound key
-    built as `<var_type>:<var_name>` matches with the rule regex. The corresponding MQTT topîc will be used
-    when sending the message.
-
-    Regex can include named capturing groups, which value are used for computing the the topic value. For
-    using this feature, the topic must include named replaceable parameters, which name match regex group ones.
-    """
-    def __init__(self, rules, logger=None):
-        """ Initializes the rules list by compiling their specifications.
-
-        The specifications are provided as an iterable of tuples, which items are :
-
-            - a string containing the regex to be applied to fully qualified variable names
-            - the MQTT topic string (or topic format string) to be used for publication
-
-        :param rules: an iterable of tuples, as described above
-        :param logger: optional logging object
-        :raises ValueError: if invalid regex, or if the topic format contains replaceable parameters
-            not found in the regex
-        """
-        self._logger = logger or DummyLogger()
-        fmt_parms_re = re.compile(r'%\(([a-zA-Z0-9]+)\)[sfdx]')
-
-        # cache for speeding up computations
-        self._cache = {}
-
-        # filtering and  transformation rules
-        self._rules = []
-
-        for s_regex, topic in rules:
-            # clean all strings
-            s_regex, topic = (s.strip() if s else None for s in (s_regex, topic))
-
-            # checks that the rule is fully specified
-            if not s_regex or not topic:
-                raise ValueError("invalid rule (regex='%s'/topic='%s')" % (s_regex, topic))
-
-            try:
-                # compile the regex => ths will checks its syntax
-                pattern = re.compile(s_regex)
-                # checks that replaceable parameters in topic are included in the captured groups of the rule
-                missing = set(fmt_parms_re.findall(topic)) - set(pattern.groupindex.keys())
-                if missing:
-                    raise ValueError('topic format parameters not found in rule regex (%s)' % ', '.join(missing))
-                # the rule is valid => we can register it
-                self._rules.append((pattern, topic))
-
-            except re.error as e:
-                raise ValueError('invalid regex (%s) : %s' % (s_regex, e))
-
-    def dump_rules(self):
-        self._logger.debug('Filtering rules :')
-        for regex, topic in self._rules:
-            self._logger.debug('- %s -> %s' % (regex.pattern, topic))
-
-    @staticmethod
-    def _make_key(var_type, var_name):
-        return var_type + ':' + var_name
-
-    def get_mqtt_topic(self, timestamp, var_type, var_name, data):
-        """ Returns the MQTT topic matching the event variable type and name, based on the
-        known regex rules.
-
-        For efficiency sake, the result is cached for avoiding scanning the rules tables and applying the
-        regex for already processed variable types and names.
-        """
-        key = self._make_key(var_type, var_name)
-        try:
-            topic = self._cache[key]
-        except KeyError:
-            for regex, topic_fmt in self._rules:
-                r = regex.match(key)
-                if r:
-                    # computes and cache the result
-                    topic = _replace_parms(topic_fmt, r.groupdict())
-                    self._cache[key] = topic
-                    self._logger.debug("matching rule cached for '%s' (%s) -> %s", key, regex.pattern, topic)
-                    return topic
-
-            self._cache[key] = None
-            self._logger.debug("'%s' -> !! blocked !!", key)
-            return None
-        else:
-            self._logger.debug("cache hit for '%s' -> %s", key, topic or '!! blocked !!')
-            return topic
-
-
-class MQTTGatewayError(Exception):
-    """ Root exception for package ones.
-    """
-
-class MQTTConnectionError(MQTTGatewayError):
-    """ Risen when we cannot connect to the broker.
-    """
-
-class MQTTNotConnectedError(MQTTGatewayError):
-    """ Risen when the requested operation cannot be done because no connection to the broker.
-    """

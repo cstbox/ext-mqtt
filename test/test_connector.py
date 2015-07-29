@@ -22,11 +22,13 @@ import unittest
 import time
 import os
 
-from pycstbox.mqtt.core import MQTTConnector, mqtt_client, MQTTNotConnectedError
+from pycstbox.mqtt.core import MQTTConnector, mqtt_client
+from pycstbox.mqtt.errors import MQTTNotConnectedError
 import pycstbox.log
 
 
 logger = None
+
 
 def setUpModule():
     global logger
@@ -38,6 +40,7 @@ def setUpModule():
         logger.error('Apollo test server not reachable')
         raise unittest.SkipTest()
     logger.info('... server OK')
+
 
 class MQTTConnectorTestCase(unittest.TestCase):
     BROKER_HOST = 'wisdom-cloud.local'

@@ -15,6 +15,7 @@ from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL
 
 _DEBUG_LOG = True
 
+
 class _BaseTestCase(unittest.TestCase):
     def setUp(self):
         self._logger = getLogger(self.__class__.__name__ + '.' + self._testMethodName)
@@ -71,19 +72,19 @@ class REOutboundFilterTestCase(_BaseTestCase):
         ], self._logger)
 
         self.assertEqual(
-            f.get_mqtt_topic(time.time(), 'temperature', 'bedroom', {'value': 25.0}),
+            f.accept_event(time.time(), 'temperature', 'bedroom', {'value': 25.0}),
             '/static/topic'
         )
         self.assertEqual(
-            f.get_mqtt_topic(time.time(), 'flow', 'kitchen', {'value': 12.0}),
+            f.accept_event(time.time(), 'flow', 'kitchen', {'value': 12.0}),
             '/static/water/flow'
         )
         self.assertEqual(
-            f.get_mqtt_topic(time.time(), 'open', 'door_entrance', {'value': True}),
+            f.accept_event(time.time(), 'open', 'door_entrance', {'value': True}),
             '/dynamic/door/entrance'
         )
         self.assertEqual(
-            f.get_mqtt_topic(time.time(), 'open', 'window_bedroom', {'value': True}),
+            f.accept_event(time.time(), 'open', 'window_bedroom', {'value': True}),
             '/dynamic/window/bedroom'
         )
         self.assertEqual(len(f._cache), 4)
@@ -98,11 +99,11 @@ class REOutboundFilterTestCase(_BaseTestCase):
             (r'open:(?P<what>[a-z0-9]+)_(?P<which>[a-z0-9]+)', '/dynamic/%(what)s/%(which)s')
         ], self._logger)
         self.assertIsNone(
-            f.get_mqtt_topic(time.time(), 'temperature', 'kitchen', {'value': 25.0})
+            f.accept_event(time.time(), 'temperature', 'kitchen', {'value': 25.0})
         )
         self.assertEqual(len(f._cache), 1)
         self.assertIsNone(
-            f.get_mqtt_topic(time.time(), 'temperature', 'kitchen', {'value': 25.0})
+            f.accept_event(time.time(), 'temperature', 'kitchen', {'value': 25.0})
         )
         self.assertEqual(len(f._cache), 1)
 
@@ -172,7 +173,7 @@ class REInboundFilterTestCase(_BaseTestCase):
 
         with self.assertRaises(NotImplementedError):
             # if we get the exception, it means we have passed all the steps
-            f.accept_event(None, None, mqtt_message)
+            f.accept_message(None, None, mqtt_message)
 
     def test_03b_filtering_impl(self):
         class RealFilter(REInboundFilter):
@@ -192,7 +193,7 @@ class REInboundFilterTestCase(_BaseTestCase):
         mqtt_message.topic = '/dim/all'
         mqtt_message.payload = 50
 
-        events = f.accept_event(None, None, mqtt_message)
+        events = f.accept_message(None, None, mqtt_message)
         self.assertEqual(len(events), 2)
         for evt, channel in events:
             self.assertEqual(channel, CONTROL_EVENT_CHANNEL)
@@ -202,7 +203,7 @@ class REInboundFilterTestCase(_BaseTestCase):
                 self.assertEqual(evt.value, True)
 
         mqtt_message.payload = 0
-        events = f.accept_event(None, None, mqtt_message)
+        events = f.accept_message(None, None, mqtt_message)
         for evt, channel in events:
             if evt.var_type == 'dim':
                 self.assertEqual(evt.value, 0)
@@ -213,7 +214,7 @@ class REInboundFilterTestCase(_BaseTestCase):
         mqtt_message.topic = '/dim/bedroom'
         mqtt_message.payload = 50
 
-        events = f.accept_event(None, None, mqtt_message)
+        events = f.accept_message(None, None, mqtt_message)
         self.assertEqual(len(events), 1)
         event, channel = events[0]
         self.assertEqual(event.value, 50)
@@ -222,7 +223,7 @@ class REInboundFilterTestCase(_BaseTestCase):
         mqtt_message.topic = '/open/door'
         mqtt_message.payload = True
 
-        events = f.accept_event(None, None, mqtt_message)
+        events = f.accept_message(None, None, mqtt_message)
         self.assertEqual(len(events), 0)
 
 

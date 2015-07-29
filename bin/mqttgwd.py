@@ -24,23 +24,29 @@ import os.path
 
 from pycstbox import log, cli, dbuslib
 from pycstbox.service import ServiceContainer
+
 from pycstbox.mqtt import dbus_binding
-from pycstbox.mqtt.core import MQTTGatewayError
+from pycstbox.mqtt.errors import MQTTGatewayError
+from pycstbox.mqtt.config import load_configuration, CFG_SERVICE_OBJECT_CLASS
 
 if __name__ == '__main__':
     log.setup_logging(os.path.basename(__file__))
 
     parser = cli.get_argument_parser('CSTBox MQTT gateway')
-    cli.add_config_file_option_to_parser(parser, dflt_name="/etc/cstbox/mqttgateway.cfg")
+    cli.add_config_file_option_to_parser(parser, dflt_name="/etc/cstbox/outbound_1.cfg")
 
     args = parser.parse_args()
 
     try:
         dbuslib.dbus_init()
 
-        cfg = dbus_binding.load_configuration(args.cfg)
-        svc_obj = cfg[dbus_binding.CFG_SERVICE_OBJECT_CLASS](cfg)
+        # load the gateway configuration
+        cfg = load_configuration(args.cfg)
 
+        # instantiate the service object
+        svc_obj = cfg[CFG_SERVICE_OBJECT_CLASS](cfg)
+
+        # build the service container
         svc = ServiceContainer(
             dbus_binding.SERVICE_NAME,
             dbuslib.get_bus(),
@@ -49,9 +55,11 @@ if __name__ == '__main__':
 
         svc.log_setLevel_from_args(args)
 
+        # start the node
         svc.start()
 
     except MQTTGatewayError as e:
+        # already logged => exit now
         sys.exit(e)
 
     except Exception as e:  # pylint: disable=W0703

@@ -31,55 +31,22 @@ and :py:class:`OutboundFilter` provided by the package module :py:mod:`pycstbox.
 
 __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
-import dbus.service
-import json
 import time
-import importlib
 import threading
+
+import dbus.service
 
 from pycstbox import dbuslib
 from pycstbox import evtmgr
 from pycstbox.log import Loggable
-from .core import MQTTConnector, MQTTGatewayError, InboundFilter, OutboundFilter
+from .core import MQTTConnector, InboundAdapter, OutboundAdapter
+from .config import *
 
 SERVICE_NAME = "MQTTGateway"
 
 ROOT_BUS_NAME = dbuslib.make_bus_name(SERVICE_NAME)
 OBJECT_PATH = "/service"
 SERVICE_INTERFACE = dbuslib.make_interface_name(SERVICE_NAME)
-
-CFG_SERVICE_OBJECT_CLASS = 'svcobj_class'
-
-
-def load_configuration(cfgfile_path):
-    """ Loads the configuration from a file and returns it as a dictionnary.
-
-    :param str cfgfile_path: configuration file path
-    :returns: the configuration data
-    :rtype: dict
-    :raises ValueError: if path is not provided of configuration data are invalid
-    :raises IOError: if not found or not a file
-    """
-    if not cfgfile_path:
-        raise ValueError('missing parameter : cfgfile_path')
-    with file(cfgfile_path, 'rt') as fp:
-        cfg = json.load(fp)
-
-    wrk = cfg['svcobj_class_name'].split('.')
-    module_name, class_name = '.'.join(wrk[:-1]), wrk[-1]
-    try:
-        module = importlib.import_module(module_name)
-    except ImportError:
-        raise ValueError('module not found : %s' % module_name)
-
-    try:
-        clazz = getattr(module, class_name)
-    except AttributeError:
-        raise ValueError('class not found : %s' % wrk)
-
-    cfg[CFG_SERVICE_OBJECT_CLASS] = clazz
-
-    return cfg
 
 
 class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
@@ -89,26 +56,28 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
 
         - listens to both sensor and control CSTBox buses for processing circulating messages for
           forwarding them in the MQTT world
-        - creates a MQTT client for the broker, and listens to the relevant MQTT topîcs,
+        - creates a MQTT client for the broker, and listens to the relevant MQTT topics,
           for injecting the corresponding messages in the CSTBox internal communication bus
 
-    In both cases, messages are first passed to an application dependant filtering layer, which decides
-    which ones are allowed to cross the boundaries. This layer takes also care of converting the messages
-    in the proper form before publishing.
+    In both cases, messages are first passed to an application dependant adaptation layer, which decides
+    which ones are allowed to cross the boundaries, and how to translate message payloads from one
+    domain to the other. The adaptation layer is basically made of classes based on :py:class:`InboundAdapter`
+    and :py:class:`OutboundAdapter`.
 
-    It is the responsibility of the application to provide these filters when creating an instance of this
-    service object (refer to the `__init__` method signature). It is valid to omit one of them, the absence of
-    filter meaning that nothing will go through in the corresponding direction.
+    It is the responsibility of the application to provide these adapters when creating an instance of this
+    service object (:py:meth:`__init__` method `input_adapter` and `output_adapter` parameters).
+    It is valid to omit one of them, the absence of an adapter meaning that nothing will go through in the
+    corresponding direction.
     """
     DEFAULT_BROKER_PORT = 61613     #: default MQTT broker connection port
 
     _mqttc = None
     _cbx_publishers = {}
     _lock = None
-    _inbound_filter = None
-    _outbound_filter = None
+    _inbound_adapter = None
+    _outbound_adapter = None
 
-    def __init__(self, cfg, inbound_filter=None, outbound_filter=None):
+    def __init__(self, cfg):
         """
         The service object is configured based on the content of the configuration data, provided as
         a dictionary by the process which instantiates it.
@@ -118,18 +87,10 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
         Note that providing no filter at all is invalid, since it would make the gateway useless.
 
         :param dict cfg: the configuration data
-        :param InboundFilter inbound_filter: the filter for MQTT to CSTBox messages (default: None)
-        :param OutboundFilter outbound_filter: the filter for CSTBox to MQTT messages (default: None)
         :raises ValueError: if both filters are unset
         """
         super(MQTTGatewayServiceObject, self).__init__()
         Loggable.__init__(self, logname='SO')
-
-        if not (inbound_filter or outbound_filter):
-            raise ValueError('no message filter were provided')
-
-        self._inbound_filter = inbound_filter
-        self._outbound_filter = outbound_filter
 
         self._lock = threading.Lock()
 
@@ -157,19 +118,36 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
         :param dict cfg: configuration data as a dictionary
         """
         try:
-            cfg_broker = cfg['broker']
-            broker_host = cfg_broker['host']
-            broker_port = cfg_broker.get('port', self.DEFAULT_BROKER_PORT)
-            client_id = cfg_broker.get('client_id', self.DEFAULT_BROKER_PORT)
+            # configure the adapters, passing them their specific sub-dictionary
+            cfg_adapters = cfg[CFG_ADAPTERS]
+            if not cfg_adapters:
+                raise ConfigurationError('at least one of input or output adapter must be configured')
 
-            cfg_auth = cfg.get('auth', None)
+            self._inbound_adapter = self._configure_adapter(cfg_adapters.get(CFG_INBOUND, None))
+            self._outbound_adapter = self._configure_adapter(cfg_adapters.get(CFG_OUTBOUND, None))
+
+        except ValueError as e:
+            raise ConfigurationError(e)
+
+        except ConfigurationError:
+            raise
+
+        else:
+            self._mqttc = self._configure_mqtt_connector(cfg)
+
+    def _configure_mqtt_connector(self, cfg):
+        try:
+            cfg_broker = cfg[CFG_BROKER]
+            broker_host = cfg_broker[CFG_HOST]
+            broker_port = cfg_broker.get(CFG_PORT, self.DEFAULT_BROKER_PORT)
+            client_id = cfg_broker.get(CFG_CLIENT_ID, self.DEFAULT_BROKER_PORT)
+
+            cfg_auth = cfg.get(CFG_AUTH, None)
             if cfg_auth:
-                login = cfg_auth['username']
-                password = cfg_auth['password']
+                login = cfg_auth[CFG_USER]
+                password = cfg_auth[CFG_PASSWORD]
             else:
                 login = password = None
-
-            topics = cfg.get('listened_topics', None)
 
             # TODO handle TLS parms et al.
 
@@ -177,7 +155,8 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
             raise ValueError('invalid configuration data')
 
         else:
-            self._mqttc = MQTTConnector(
+            topics = self._inbound_adapter.get_listened_topics() if self._inbound_adapter else None
+            mqttc = MQTTConnector(
                 broker=broker_host,
                 port=broker_port,
                 client_id=client_id,
@@ -187,43 +166,62 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
                 logger=self
             )
 
-            self._mqttc.on_message = self._on_message
+            mqttc.on_message = self._on_message
+            return mqttc
+
+    def _configure_adapter(self, cfg):
+        """ Creates and configures an adapter based on the configuration data.
+
+        Does nothing and returns None if the configuration contains no data or is None.
+
+        :param dict cfg: the inbound adapter configuration data
+        :return: the created adapter (or None)
+        :rtype: :py:class:`InboundAdapter` or :py:class:`OutboundAdapter`
+        """
+        if not cfg:
+            return None
+
+        klass = symbol_for_name(cfg[CFG_ADAPTER_CLASS])
+        adapter = klass()
+        adapter.configure(cfg)
+        return adapter
 
     def _on_message(self, client, user_data, message):
-        if self._inbound_filter:
+        if self._inbound_adapter:
             with self._lock:
-                pub_list = self._inbound_filter.accept_event(client, user_data, message)
-                if pub_list:
-                    timestamp = int(time.time() * 1000)
-                    for event, channel in pub_list:
-                        try:
-                            publisher = self._cbx_publishers[channel]
-                        except KeyError:
-                            self._cbx_publishers[channel] = publisher = evtmgr.get_object(channel)
-                        publisher.emitFullEvent(timestamp, event.var_type, event.var_name, event.data)
+                now = int(time.time() * 1000)
+                for event, channel in self._inbound_adapter.handle_message(client, user_data, message):
+                    try:
+                        publisher = self._cbx_publishers[channel]
+                    except KeyError:
+                        self._cbx_publishers[channel] = publisher = evtmgr.get_object(channel)
+                    publisher.emitFullEvent(now, event.var_type, event.var_name, event.data)
 
-    def _event_signal_handler(self, timestamp, var_type, var_name, data):
-        if self._outbound_filter:
-            with self._lock:
-                mqtt_topic = self._outbound_filter.get_mqtt_topic(timestamp, var_type, var_name, data)
-                if mqtt_topic:
-                    self.log_debug(
-                        "forwarded to MQTT: timestamp=%s var_type=%s var_name=%s data=%s",
-                        timestamp, var_type, var_name, data)
-                    payload = {
-                        'var_type': var_type,
-                        'data': data
-                    }
-                    self._mqttc.publish(mqtt_topic, payload)
+    @staticmethod
+    def _channel_event_handler(channel):
+        def _event_handler(self, timestamp, var_type, var_name, data):
+            if self._outbound_adapter:
+                with self._lock:
+                    mqtt_message = self._outbound_adapter.handle_event(timestamp, channel, var_type, var_name, data)
+                    if mqtt_message:
+                        self.log_debug(
+                            "forwarded to MQTT: timestamp=%s channel=%s var_type=%s var_name=%s data=%s",
+                            timestamp, channel, var_type, var_name, data)
+                        self._mqttc.publish(*mqtt_message)
+
+        return _event_handler
 
     def start(self):
         """ Starts the service object.
         """
         self.log_info('starting...')
+
         # collects first all the event manager service objects we need before
         # connecting to anything
+        # Note: current implementation handles sensor events only, but provisions are made for extending this
+        # in the future
         svcs = []
-        for channel in (evtmgr.SENSOR_EVENT_CHANNEL, evtmgr.CONTROL_EVENT_CHANNEL):
+        for channel in [evtmgr.SENSOR_EVENT_CHANNEL]:
             try:
                 svc = evtmgr.get_object(channel)
             except dbus.exceptions.DBusException as e:
@@ -235,7 +233,7 @@ class MQTTGatewayServiceObject(Loggable, dbus.service.Object):
         # everybody is here, so we can start to work
         for channel, svc in svcs:
             svc.connect_to_signal("onCSTBoxEvent",
-                                  self._event_signal_handler,
+                                  self._channel_event_handler(channel),
                                   dbus_interface=evtmgr.SERVICE_INTERFACE)
             self.log_info('connected to event channel : %s', channel)
 
