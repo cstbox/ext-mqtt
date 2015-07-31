@@ -33,7 +33,7 @@ if __name__ == '__main__':
     log.setup_logging(os.path.basename(__file__))
 
     parser = cli.get_argument_parser('CSTBox MQTT gateway')
-    cli.add_config_file_option_to_parser(parser, dflt_name="/etc/cstbox/outbound_1.cfg")
+    cli.add_config_file_option_to_parser(parser, dflt_name="/etc/cstbox/mqtt_gateway.cfg")
 
     args = parser.parse_args()
 
@@ -57,6 +57,10 @@ if __name__ == '__main__':
 
         # start the node
         svc.start()
+
+    except KeyError as e:
+        logging.exception("invalid configuration: %s", e)
+        sys.exit(e)
 
     except MQTTGatewayError as e:
         # already logged => exit now
