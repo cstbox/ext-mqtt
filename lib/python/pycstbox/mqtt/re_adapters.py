@@ -32,7 +32,7 @@ from collections import namedtuple
 import re
 
 from pycstbox.events import BasicEvent
-from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL
+from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL, EventOnBus
 from pycstbox.log import Loggable
 from .core import InboundAdapter, OutboundAdapter
 from .errors import EventHandlerError
@@ -239,6 +239,9 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
         group_dict:
             the rule regular expression capture group dictionary (empty if capture groups are not used)
 
+        extra:
+            a dictionary of extra data passed to the builder (can be empty)
+
         adapter:
             the adapter calling it
 
@@ -249,6 +252,8 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
         If the builder is implemented as a method of the adapter, don't forget to tag it as a static method to avoid
         `self` being passed as the first parameter.
     """
+    builder_args_count = 5
+
     def __init__(self, rules=None):
         """ Initializes the rules list by compiling their specifications.
 
@@ -277,19 +282,23 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
 
         The passed configuration data is a dictionary which contains the following key(s):
 
-            class_name:
+            adapter_class:
                 the fully qualified name of the class implementing the adapter
 
             rules:
                 the dictionary of rules groups
 
-        The rules groups dictionary specifies the list of rules to be applied to events circulating on a given channel.
-        Each rule inside the group is described by a tuple composed of :
+        The adapter class is already used by the :py:meth:`configure` method of the base class to ensure we are
+        using configuration data pertaining to the type of the adapter. We don't have to care about it here normally.
+
+        The rules groups dictionary specifies the list of rules to be applied to events circulating on the channel
+        the adapter is associated to. Each rule inside the group is described by a tuple composed of :
 
             - the pattern of the regex applied to the event combined signature, built by concatenating its var_type
             and var_name
             - the topic of the corresponding MQTT message to be sent
             - the qualified name of the function or method producing the message payload based on the event's one
+            - a dictionary of optional extra data passed to the payload builder
 
         The order of the rule is important, since the first match stops the search.
 
@@ -304,41 +313,46 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
         key_pattern = ''
         default_builder = cfg.get(CFG_DEFAULT_BUILDER, None)
         try:
-            for channel, rules_list in cfg[CFG_RULES].iteritems():
-                for rule in rules_list:
-                    try:
-                        evt_signature_pattern, topic = (s.strip() for s in rule[:2])
-                    except ValueError:
-                        raise ConfigurationError('incomplete rule (%s)' % rule)
+            for rule in cfg[CFG_RULES]:
+                try:
+                    evt_signature_pattern, topic = (s.strip() for s in rule[:2])
+                except ValueError:
+                    raise ConfigurationError('incomplete rule (%s)' % rule)
 
-                    if not all((evt_signature_pattern, topic)):
-                        raise ConfigurationError(
-                            'empty member(s) found (p=%s t=%s)' % (evt_signature_pattern, topic)
-                        )
+                if not all((evt_signature_pattern, topic)):
+                    raise ConfigurationError(
+                        'empty member(s) found (p=%s t=%s)' % (evt_signature_pattern, topic)
+                    )
 
+                try:
+                    extra = rule[2]
+                except IndexError:
+                    extra = {}
+                    builder_fqn = ""
+                else:
                     try:
-                        builder_fqn = rule[2].strip()
+                        builder_fqn = rule[3].strip()
                     except IndexError:
                         builder_fqn = ""
 
-                    if builder_fqn:
-                        builder = self.resolve_builder(builder_fqn)
+                if builder_fqn:
+                    builder = self.resolve_builder(builder_fqn)
+                else:
+                    if default_builder:
+                        builder = default_builder
                     else:
-                        if default_builder:
-                            builder = default_builder
-                        else:
-                            raise ConfigurationError(
-                                'no builder specified and no default builder configured for rule (%s)' % rule
-                            )
+                        raise ConfigurationError(
+                            'no builder specified and no default builder configured for rule (%s)' % rule
+                        )
 
-                    key_pattern = channel + EVENT_KEY_SEP + evt_signature_pattern
-                    key_re = re.compile(key_pattern)
-                    # checks that replaceable parameters in topic are all included in the captured groups of the rule
-                    missing = set(_FMT_PARMS_RE.findall(topic)) - set(key_re.groupindex.keys())
-                    if missing:
-                        raise ConfigurationError('topic format parameter(s) not found in rule regex: %s' % ', '.join(missing))
+                signature_re = re.compile(evt_signature_pattern)
 
-                    rules.append(OutboundRule(key_re, MessageProductionRule(topic, builder)))
+                # checks that replaceable parameters in topic are all included in the captured groups of the rule
+                missing = set(_FMT_PARMS_RE.findall(topic)) - set(signature_re.groupindex.keys())
+                if missing:
+                    raise ConfigurationError('topic format parameter(s) not found in rule regex: %s' % ', '.join(missing))
+
+                rules.append(OutboundRule(signature_re, MessageProductionRule(topic, builder, extra)))
 
         except ConfigurationError as e:
             self.logger.error(e)
@@ -366,28 +380,28 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
         for regex, mpr in self.rules:
             self.logger.debug('- %s -> %s' % (regex.pattern, mpr))
 
-    def handle_event(self, timestamp, channel, var_type, var_name, data):
+    def handle_event(self, timestamp, var_type, var_name, data):
         """ For efficiency sake, this implementation caches the result for avoiding scanning the rules tables
         and applying the regex for already known events signatures.
         """
-        topic = gd = payload_builder = None
+        topic = gd = payload_builder = extra = None
 
-        key = _make_event_key(channel, var_type, var_name)
+        key = _make_event_key(var_type, var_name)
         found = False
         try:
-            topic, gd, payload_builder = self._cache[key]
+            topic, gd, payload_builder, extra = self._cache[key]
             found = True
             self.logger.debug("cache hit for '%s' -> %s", key, topic)
 
         except KeyError:
             for regex, mpr in self.rules:
-                topic, payload_builder = mpr
+                topic, payload_builder, extra = mpr
                 r = regex.match(key)
                 if r:
                     # computes and caches the result
                     gd = r.groupdict()
                     topic = _replace_parms(topic, gd)
-                    self._cache[key] = (topic, gd, payload_builder)
+                    self._cache[key] = (topic, gd, payload_builder, extra)
 
                     found = True
                     self.logger.debug("added rule to cache for '%s' (%s) -> %s", key, regex.pattern, topic)
@@ -396,7 +410,7 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
         if found:
             try:
                 payload = payload_builder(
-                    topic, EventTuple(timestamp, channel, var_type, var_name, data), gd, self
+                    topic, EventOnBus(timestamp, var_type, var_name, data), gd, extra, self
                 ) or {}
             except Exception as e:
                 msg = 'payload builder failure: %s (event key=%s)' % (e, key)
@@ -408,46 +422,41 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
             return None
 
 
-EventTuple = namedtuple('EventTuple', 'timestamp, channel, var_type, var_name, payload')
-
-
-class EventProductionRule(namedtuple('EventProductionRule', 'var_type var_name payload_builder channel')):
+class EventProductionRule(namedtuple('EventProductionRule', 'var_type var_name payload_builder')):
     """ CSTBox event production rule.
     """
     __slots__ = ()
 
-    def __new__(cls, var_type, var_name, payload_builder, channel=CONTROL_EVENT_CHANNEL):
+    def __new__(cls, var_type, var_name, payload_builder):
         """
         :param var_type: the variable type
         :param var_name: the variable name
         :param payload_builder: a callable returning the event payload, based on the MQTT message content
-        :param channel: the channel on which the event will be emitted. If omitted, it is defaulted to
-        :py:attr:`pycstbox.evtmgr.CONTROL_EVENT_CHANNEL`
         """
-        var_type, var_name, channel = t = var_type.strip(), var_name.strip(), channel.strip()
+        var_type, var_name = t = var_type.strip(), var_name.strip()
         if not all(t):
-            raise ValueError("invalid production rule (var_type='%s'/var_name='%s'/channel='%s')" % t)
+            raise ValueError("invalid production rule (var_type='%s'/var_name='%s')" % t)
         if not payload_builder:
             raise ValueError("rule misses the payload_builder (var_type='%s'/var_name='%s'" % (var_type, var_name))
 
         return super(EventProductionRule, cls).__new__(
-            cls, var_type, var_name, payload_builder, channel
+            cls, var_type, var_name, payload_builder
         )
 
 
 OutboundRule = namedtuple('OutboundRule', 'regex mpr')
 
 
-class MessageProductionRule(namedtuple('MessageProductionRule', 'topic payload_builder')):
+class MessageProductionRule(namedtuple('MessageProductionRule', 'topic payload_builder extra')):
     """ MQTT message production rule.
     """
     __slots__ = ()
 
-    def __new__(cls, topic, payload_builder):
+    def __new__(cls, topic, payload_builder, extra={}):
         topic = topic.strip()
         if not all((topic, payload_builder)):
             raise ValueError("invalid production rule (topic='%s'/payload_builder='%s')" % (topic, payload_builder))
-        return super(MessageProductionRule, cls).__new__(cls, topic, payload_builder)
+        return super(MessageProductionRule, cls).__new__(cls, topic, payload_builder, extra)
 
 
 def _replace_parms(s, d):
@@ -460,8 +469,8 @@ def _replace_parms(s, d):
 EVENT_KEY_SEP = ':'
 
 
-def _make_event_key(channel, var_type, var_name):
-    return EVENT_KEY_SEP.join((channel, var_type, var_name))
+def _make_event_key(var_type, var_name):
+    return EVENT_KEY_SEP.join((var_type, var_name))
 
 # expansion allowed formats (ex: %(foo)s, %(bar)x,...)
 _FMT_PARMS_RE = re.compile(r'%\(([a-zA-Z0-9]+)\)[sfdx]')
