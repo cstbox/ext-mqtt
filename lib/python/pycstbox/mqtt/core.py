@@ -21,7 +21,6 @@ This gateway is basically based on the :py:class:`MQTTConnector` class, which
 wraps the connection with the MQTT broken in a convenient way, and offers the proper
 extension points for assembling the complete gateway.
 """
-from pycstbox.mqtt.errors import MQTTConnectionError, MQTTNotConnectedError, ConfigurationError
 
 __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
@@ -32,15 +31,18 @@ __all__ = [
 
 import time
 import inspect
+import json
 
 from paho.mqtt import client as mqtt_client
 
-from pycstbox.log import DummyLogger
-from pycstbox.sysutils import symbol_for_name
-from .config import Configurable, CFG_ADAPTER_CLASS, CFG_DEFAULT_BUILDER
+from pycstbox.log import DummyLogger, Loggable
+from pycstbox.evtmgr import ALL_CHANNELS
+
+from .config import *
+from .errors import MQTTConnectionError, MQTTNotConnectedError, ConfigurationError
 
 
-class MQTTConnector(object):
+class MQTTConnector(Loggable):
     """ The base class taking care of bridging the CSTBox internal message bus and the
     MQTT one.
 
@@ -50,7 +52,7 @@ class MQTTConnector(object):
 
     def __init__(
             self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, topics=None,
-            logger=None
+            **kwargs
     ):
         """
         :param str broker: the broker server public name or IP
@@ -61,23 +63,24 @@ class MQTTConnector(object):
         :param str password: optional authentication password
         :param tls: configuration for TLS if used (not used in current implementation)
         :param topics: an optional list of MQTT topics to subscribe to when connected
-        :param logger: optional logger
+        :param kwargs: parameters for base class
         """
+        super(MQTTConnector, self).__init__(**kwargs)
+
         self._broker = broker
         self._port = port
         self._keep_alive = keep_alive
         self._auth = {'username': login, 'password': password} if login else None
         self._tls = tls
-        self._logger = logger or DummyLogger()
-        self._logger_mqtt = logger.getChild('paho') if logger else self._logger
+        self._logger_mqtt = self.logger.getChild('paho')
         self._topics = topics or []
 
         self._mqttc = mqtt_client.Client(client_id=client_id)
         if tls:
-            self._logger.info('configuration: TLS')
+            self.log_info('configuration: TLS')
             self._mqttc.tls_set(**tls)
         if login:
-            self._logger.info('configuration: authentication')
+            self.log_info('configuration: authentication')
             self._mqttc.username_pw_set(login, password)
 
         # connects callbacks
@@ -87,7 +90,7 @@ class MQTTConnector(object):
         # self._mqttc.on_unsubscribe = self._on_unsubscribe
         self._mqttc.on_publish = self._on_publish
         self._mqttc.on_log = self._on_log
-        self._logger.info('callbacks wired')
+        self.log_info('callbacks wired')
 
         self._log_dispatch = {
             mqtt_client.MQTT_LOG_INFO: self._logger_mqtt.info,
@@ -121,18 +124,24 @@ class MQTTConnector(object):
         self._logger_mqtt.info('disconnected')
         self._status = self.STATUS_DISCONNECTED
 
-    def publish(self, *args, **kwargs):
+    def publish(self, topic, payload, *args, **kwargs):
         """ Publish a message on MQTT.
 
         This method is a facade of the MQTT client homonym one, checking that the communication is established
         before passing the call.
+
+        In addition, it automatically serialise complex payloads (i.e. dict, list, tuples) as JSON before
+        sending them.
 
         It uses the same signature as the homonym method of the paho Client. Refer to its
         `documentation <https://pypi.python.org/pypi/paho-mqtt>`_ for details.
         """
         if not self.connected:
             raise MQTTNotConnectedError('not connected')
-        return self._mqttc.publish(*args, **kwargs)
+
+        if isinstance(payload, (dict, list, tuple)):
+            payload = json.dumps(payload)
+        return self._mqttc.publish(topic, payload, *args, **kwargs)
 
     @property
     def connected(self):
@@ -173,18 +182,18 @@ class MQTTConnector(object):
         to avoid race conditions.
         """
         if not self.connected:
-            self._logger.info('connecting to %s:%d...', self._broker, self._port)
+            self.log_info('connecting to %s:%d...', self._broker, self._port)
             rc = self._mqttc.connect(self._broker, self._port, self._keep_alive)
             if rc != mqtt_client.MQTT_ERR_SUCCESS:
                 raise MQTTConnectionError(rc)
 
             self._mqttc.loop_start()
-            self._logger.info('threaded loop started')
+            self.log_info('threaded loop started')
             while self._status == self.STATUS_DISCONNECTED:
                 time.sleep(0.1)
 
         else:
-            self._logger.warning('already active')
+            self.log_warning('already active')
 
     def shutdown(self):
         """ Shutdowns the connector.
@@ -192,10 +201,10 @@ class MQTTConnector(object):
         if self.connected:
             self._mqttc.disconnect()
             self._mqttc.loop_stop()
-            self._logger.info('shutdown complete')
+            self.log_info('shutdown complete')
 
         else:
-            self._logger.warning('not currently active')
+            self.log_warning('not currently active')
 
 
 class ConfigurableAdapter(Configurable):
@@ -204,6 +213,8 @@ class ConfigurableAdapter(Configurable):
     Derived classes must implement the :py:meth:`_configure` method to provide their specific
     configuration handling, which is invoked at the end of the shared processing.
     """
+    builder_args_count = None
+
     def configure(self, cfg):
         """ Processes and applies the adapter specific configuration.
 
@@ -232,7 +243,6 @@ class ConfigurableAdapter(Configurable):
 
         if my_class != cfg_class:
             msg = 'class type mismatch (%s != %s)' % (my_class, cfg_class)
-            self.logger.error(msg)
             raise ConfigurationError(msg)
 
         # resolve the default builder if here
@@ -246,7 +256,7 @@ class ConfigurableAdapter(Configurable):
 
     def resolve_builder(self, fqn):
         # short-circuit the case where the resolution has already been done
-        if inspect.isclass(fqn):
+        if inspect.isfunction(fqn):
             return fqn
 
         try:
@@ -259,9 +269,10 @@ class ConfigurableAdapter(Configurable):
             if not callable(builder):
                 raise ConfigurationError("builder is not callable (%s)" % fqn)
 
-            args, _, _, _ = inspect.getargspec(builder)
-            if len(args) != 4:
-                raise ConfigurationError('builder signature mismatch (%s)' % fqn)
+            if self.builder_args_count is not None:
+                args, _, _, _ = inspect.getargspec(builder)
+                if len(args) != self.builder_args_count:
+                    raise ConfigurationError('builder signature mismatch (%s)' % fqn)
 
             return builder
 
@@ -321,15 +332,15 @@ class InboundAdapter(ConfigurableAdapter):
 class OutboundAdapter(ConfigurableAdapter):
     """ Base class for implementing adapters for outgoing CSTBox events.
 
-    Its role is to define if a given CSTBox message can be published on the MQTT domain,
-    and in this case which is the relevant MQTT topic to be used.
+    An adapter is devoted to a given event channel. Its role is to listen to events on it, to filter events that
+    will be published and and to build the MQTT message to be sent.
 
     .. IMPORTANT::
 
-        To be sub-classed, since the default implementation forbid any event
-        to go outside of the CSTBox domain.
+        To be sub-classed, since the default implementation of the event handler returns None, and thus forbids
+        any event to go outside of the CSTBox domain.
     """
-    def handle_event(self, timestamp, channel, var_type, var_name, data):
+    def handle_event(self, timestamp, var_type, var_name, data):
         """ Returns the MQTT topic and payload, conforming the broker conventions and corresponding to the CSTBox
         candidate message.
 
@@ -337,7 +348,6 @@ class OutboundAdapter(ConfigurableAdapter):
         default implementation).
 
         :param int timestamp: the event time stamp
-        :param str channel: the event channel
         :param str var_type: the type of the variable the event is related to
         :param str var_name: the name of the variable
         :param dict data: the event specific payload
@@ -345,3 +355,115 @@ class OutboundAdapter(ConfigurableAdapter):
         :rtype: tuple
         """
         return None
+
+
+class ConfigurableGatewayMixin(Configurable):
+    """ This mixin takes care of initializing and configuring the gateway core components,
+    i.e. the MQTT connector, the inbound adapter and the outbound adapter.
+    """
+
+    def configure(self, cfg, logger=None):
+        """ Configures the service object.
+
+        The configuration data are provided as a dictionary, which keys and structure are :
+
+            - `broker` : sub-dictionary providing the broker connection information
+
+                - `host` : public host name or IP of the server
+                - `port` : connection port, defaulted to :py:attr:`DEFAULT_BROKER_PORT` if not
+                  provided
+                - `client_id` : optional identifier attached to the MQTT client
+
+            - `auth` : optional sub-dictionary containing the authentication information
+
+                - `username` : login
+                - `password` : guess what...
+
+        :param dict cfg: configuration data as a dictionary
+        :param logger: an optional logger which will be passed to participating Loggable instances
+        :return: the MQTT connector instance, the inbound adapter, the outbound adapters
+        :rtype: tuple
+        """
+        try:
+            cfg_adapters = cfg[CFG_ADAPTERS]
+            if not cfg_adapters:
+                raise ConfigurationError('at least one of input or output adapter must be configured')
+
+            # configure the input adapter
+            # TODO inbound_adapter = self._configure_adapter(cfg_adapters.get(CFG_INBOUND, None))
+            inbound_adapter = None
+
+            # configure the output adapters (one per channel)
+            outbound_adapters = {}
+            try:
+                cfg_outbound = cfg_adapters[CFG_OUTBOUND]
+            except KeyError:
+                pass
+            else:
+                for channel, cfg_channel in cfg_outbound[CFG_CHANNELS].iteritems():
+                    if channel in ALL_CHANNELS:
+                        outbound_adapters[channel] = self._configure_adapter(cfg_channel)
+                    else:
+                        raise ConfigurationError('invalid channel: %s' % channel)
+
+        except ValueError as e:
+            raise ConfigurationError(e)
+
+        except ConfigurationError:
+            raise
+
+        else:
+            mqttc = self._configure_mqtt_connector(
+                cfg,
+                inbound_adapter.get_listened_topics() if inbound_adapter else None,
+            )
+
+        return mqttc, inbound_adapter, outbound_adapters
+
+    def _configure_mqtt_connector(self, cfg, listened_topics=None):
+        try:
+            cfg_broker = cfg[CFG_BROKER]
+            broker_host = cfg_broker[CFG_HOST]
+            broker_port = cfg_broker.get(CFG_PORT, DEFAULT_BROKER_PORT)
+            client_id = cfg_broker.get(CFG_CLIENT_ID, DEFAULT_CLIENT_ID)
+
+            cfg_auth = cfg.get(CFG_AUTH, None)
+            if cfg_auth:
+                login = cfg_auth[CFG_USER]
+                password = cfg_auth[CFG_PASSWORD]
+            else:
+                login = password = None
+
+            # TODO handle TLS parms et al.
+
+        except KeyError:
+            raise ValueError('invalid configuration data')
+
+        else:
+            mqttc = MQTTConnector(
+                broker=broker_host,
+                port=broker_port,
+                client_id=client_id,
+                login=login,
+                password=password,
+                topics=listened_topics,
+                logger=None
+            )
+            return mqttc
+
+    def _configure_adapter(self, cfg):
+        """ Creates and configures an adapter based on the configuration data.
+
+        Does nothing and returns None if the configuration contains no data or is None.
+
+        :param dict cfg: the inbound adapter configuration data
+        :return: the created adapter (or None)
+        :rtype: :py:class:`InboundAdapter` or :py:class:`OutboundAdapter`
+        """
+        if not cfg:
+            return None
+
+        klass = symbol_for_name(cfg[CFG_ADAPTER_CLASS])
+        adapter = klass()
+        adapter.configure(cfg)
+        return adapter
