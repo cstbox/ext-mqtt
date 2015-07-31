@@ -3,6 +3,9 @@
 """ pytest unit tests for REOutboundAdapter
 """
 
+__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
+
+
 import os
 import logging
 import inspect
@@ -16,7 +19,7 @@ from pycstbox.mqtt.errors import ConfigurationError
 @pytest.fixture
 def cfg():
     import json
-    with file(os.path.join(os.path.dirname(__file__), 'fixtures/outbound_tests.cfg')) as fp:
+    with file(os.path.join(os.path.dirname(__file__), 'fixtures/outbound.cfg')) as fp:
         cfg_dict = json.load(fp)
     assert cfg_dict
     return cfg_dict
@@ -37,7 +40,7 @@ class TestConfiguration(object):
     def test_config_ok(self, adapter, cfg):
         adapter.configure(cfg['outbound.ok'])
         assert len(adapter.rules) == 2
-        assert adapter.rules[1].regex.match('sensor:usage:water_kitchen')
+        assert adapter.rules[1].regex.match('usage:water_kitchen')
 
     def test_default_builder(self, adapter, cfg):
         adapter.configure(cfg['outbound.default_builder'])
@@ -110,26 +113,26 @@ def cfg_outbound(adapter, cfg):
 
 
 class TestHandling(object):
-    def test_match_1(self, adapter, cfg, cfg_outbound):
-        result = adapter.handle_event(0, "sensor", "flow", "main", {"value": True})
+    def test_match_1(self, adapter, cfg_outbound):
+        result = adapter.handle_event(0, "flow", "main", {"value": True})
         assert result is not None, "no match for flow:main"
         topic, payload = result
         assert topic == 'main_flow'
         assert payload['value']
 
-    def test_match_2(self, adapter, cfg, cfg_outbound):
-        result = adapter.handle_event(0, "sensor", "usage", "water_kitchen", {"value": True})
+    def test_match_2(self, adapter, cfg_outbound):
+        result = adapter.handle_event(0, "usage", "water_kitchen", {"value": True})
         assert result is not None, "no match for usage:water_kitchen"
         topic, payload = result
         assert topic == 'usage_kitchen'
         assert payload['value']
 
-    def test_match_3(self, adapter, cfg, cfg_outbound):
-        result = adapter.handle_event(0, "sensor", "usage", "cupboard_kitchen", {"value": True})
+    def test_match_3(self, adapter, cfg_outbound):
+        result = adapter.handle_event(0, "usage", "cupboard_kitchen", {"value": True})
         assert result is None, "unexpected match for usage:cupboard_kitchen"
 
-    def test_match_4(self, adapter, cfg, cfg_outbound):
-        result = adapter.handle_event(0, "control", "switch", "living", {"value": True})
+    def test_match_4(self, adapter, cfg_outbound):
+        result = adapter.handle_event(0, "switch", "living", {"value": True})
         assert result is None, "unexpected match for control:switch:living"
 
 
@@ -138,14 +141,17 @@ def cfg_builder(adapter, cfg):
     return adapter.configure(cfg['outbound.builder'])
 
 
-def wisdom_builder(mqtt_topic, event, group_dict, adapter):
+from pycstbox.events import DataKeys
+
+
+def wisdom_builder(mqtt_topic, event, group_dict, extra, adapter):
     msg = {
         'origin_type': 'device',
         'origin': 'cstbox.gerhome',
-        'observation': mqtt_topic,
+        'observation': extra['observation'],
         "timestamp": event.timestamp,
         'variable_value': [
-            {'timestamp': event.timestamp, 'value': event.payload['value']}
+            {'timestamp': event.timestamp, 'value': event.data[DataKeys.VALUE]}
         ]
     }
     return msg
@@ -157,7 +163,7 @@ class TestBuilder(object):
         now = int(time.time())
         value = 35
 
-        result = adapter.handle_event(now, "sensor", "meter", "main", {"value": value})
+        result = adapter.handle_event(now, "meter", "main", {"value": value})
         assert result
         topic, payload = result
         assert topic == '/data/observation/main_meter'
