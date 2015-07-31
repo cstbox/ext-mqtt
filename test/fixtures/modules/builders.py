@@ -4,9 +4,10 @@
 __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
 
-def mqtt_payload_builder(mqtt_topic, event, group_dict, adapter):
-    event_payload = event[-1]
-    return {'value': event_payload['value']}
+def mqtt_payload_builder(mqtt_topic, event, group_dict, extra, adapter):
+    return {
+        'value': event.data['value']
+    }
 
 
 not_callable = 42
