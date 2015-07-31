@@ -25,7 +25,7 @@ follows :
 
 __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
-import json
+from json import load as json_load
 
 from pycstbox.sysutils import symbol_for_name
 
@@ -48,6 +48,10 @@ CFG_OUTBOUND = 'outbound'
 CFG_ADAPTER_CLASS = "adapter_class"
 CFG_DEFAULT_BUILDER = 'default_builder'
 CFG_RULES = 'rules'
+CFG_CHANNELS = 'channels'
+
+DEFAULT_BROKER_PORT = 61613
+DEFAULT_CLIENT_ID = ""
 
 
 class Configurable(object):
@@ -79,7 +83,7 @@ def load_configuration(cfgfile_path):
         raise ValueError('missing parameter : cfgfile_path')
 
     with file(cfgfile_path, 'rt') as fp:
-        cfg = json.load(fp)
+        cfg = json_load(fp)
 
     # resolves the service object class name
     try:
