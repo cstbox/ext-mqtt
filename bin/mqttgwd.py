@@ -41,7 +41,7 @@ if __name__ == '__main__':
         dbuslib.dbus_init()
 
         # load the gateway configuration
-        cfg = load_configuration(args.cfg)
+        cfg = load_configuration(args.config_path)
 
         # instantiate the service object
         svc_obj = cfg[CFG_SERVICE_OBJECT_CLASS](cfg)
