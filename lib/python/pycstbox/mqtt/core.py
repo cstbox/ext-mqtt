@@ -141,6 +141,7 @@ class MQTTConnector(Loggable):
 
         if isinstance(payload, (dict, list, tuple)):
             payload = json.dumps(payload)
+        self.log_info('publishing message (topic=%s payload=%s)', topic, payload[:30])
         return self._mqttc.publish(topic, payload, *args, **kwargs)
 
     @property
@@ -182,15 +183,18 @@ class MQTTConnector(Loggable):
         to avoid race conditions.
         """
         if not self.connected:
-            self.log_info('connecting to %s:%d...', self._broker, self._port)
+            self.log_info('connecting to broker at "%s:%d"...', self._broker, self._port)
             rc = self._mqttc.connect(self._broker, self._port, self._keep_alive)
             if rc != mqtt_client.MQTT_ERR_SUCCESS:
                 raise MQTTConnectionError(rc)
 
             self._mqttc.loop_start()
-            self.log_info('threaded loop started')
+            self.log_info('connector loop started')
+
+            self.log_info('waiting for broker connection to be established...')
             while self._status == self.STATUS_DISCONNECTED:
                 time.sleep(0.1)
+            self.log_info('connector successfully started')
 
         else:
             self.log_warning('already active')
@@ -359,7 +363,7 @@ class OutboundAdapter(ConfigurableAdapter):
 
 class ConfigurableGatewayMixin(Configurable):
     """ This mixin takes care of initializing and configuring the gateway core components,
-    i.e. the MQTT connector, the inbound adapter and the outbound adapter.
+    i.e. the MQTT connector, the inbound adapter and the outbound adapters.
     """
 
     def configure(self, cfg, logger=None):
