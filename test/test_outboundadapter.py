@@ -135,6 +135,14 @@ class TestHandling(object):
         result = adapter.handle_event(0, "switch", "living", {"value": True})
         assert result is None, "unexpected match for control:switch:living"
 
+    def test_match_5(self, adapter, cfg):
+        adapter.configure(cfg['outbound.special_chars'])
+        result = adapter.handle_event(0, "usage", "usage.kitchen.sink", {"value": True})
+        assert result is not None, "no match for usage:usage.kitchen.sink"
+        topic, payload = result
+        assert topic == '/data/observation/kitchen.sink'
+        assert payload['value']
+
 
 @pytest.fixture
 def cfg_builder(adapter, cfg):
