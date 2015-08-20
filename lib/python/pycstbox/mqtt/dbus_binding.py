@@ -33,6 +33,7 @@ __author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
 import time
 import threading
+import json
 
 import dbus.service
 from paho.mqtt import client as mqtt_client
@@ -117,15 +118,19 @@ class MQTTGatewayServiceObject(dbus.service.Object, ConfigurableGatewayMixin, Lo
                         self._cbx_publishers[channel] = publisher = evtmgr.get_object(channel)
                     publisher.emitFullEvent(now, event.var_type, event.var_name, event.data)
 
-    @staticmethod
-    def _channel_event_handler(channel):
-        def _event_handler(self, timestamp, var_type, var_name, data):
+    def _channel_event_handler(self, channel):
+        def _event_handler(timestamp, var_type, var_name, data):
             try:
                 adapter = self._outbound_adapters[channel]
             except KeyError:
                 pass
             else:
                 with self._lock:
+                    if isinstance(data, basestring):
+                        try:
+                            data = json.loads(data)
+                        except ValueError as e:
+                            raise MQTTGatewayError("invalid CSTBox event data content (%s). Error: %s" % (data, e))
                     mqtt_message = adapter.handle_event(timestamp, var_type, var_name, data)
                     if mqtt_message:
                         self.log_debug(
