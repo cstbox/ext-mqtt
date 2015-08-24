@@ -52,6 +52,7 @@ class MQTTConnector(Loggable):
 
     def __init__(
             self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, topics=None,
+            simulate=False,
             **kwargs
     ):
         """
@@ -63,6 +64,7 @@ class MQTTConnector(Loggable):
         :param str password: optional authentication password
         :param tls: configuration for TLS if used (not used in current implementation)
         :param topics: an optional list of MQTT topics to subscribe to when connected
+        :param bool simulate: if True, do no perform any network operation, but trace them instead
         :param kwargs: parameters for base class
         """
         super(MQTTConnector, self).__init__(**kwargs)
@@ -74,14 +76,20 @@ class MQTTConnector(Loggable):
         self._tls = tls
         self._logger_mqtt = self.logger.getChild('paho')
         self._topics = topics or []
+        self._simulate = simulate
+        self._status = self.STATUS_DISCONNECTED
 
-        self._mqttc = mqtt_client.Client(client_id=client_id)
-        if tls:
-            self.log_info('configuration: TLS')
-            self._mqttc.tls_set(**tls)
-        if login:
-            self.log_info('configuration: authentication')
-            self._mqttc.username_pw_set(login, password)
+        if not simulate:
+            self._mqttc = mqtt_client.Client(client_id=client_id)
+            if tls:
+                self.log_info('configuration: TLS')
+                self._mqttc.tls_set(**tls)
+            if login:
+                self._mqttc.username_pw_set(login, password)
+                self.log_info('configuration: authentication')
+        else:
+            self._mqttc = MQTTSimulatedClient(logger=self.logger)
+            self._status = self.STATUS_CONNECTED
 
         # connects callbacks
         self._mqttc.on_connect = self._on_connect
@@ -104,8 +112,6 @@ class MQTTConnector(Loggable):
         # self.subscribe = self._mqttc.subscribe
         # self.unsubscribe = self._mqttc.unsubscribe
         self.user_data_set = self._mqttc.user_data_set
-
-        self._status = self.STATUS_DISCONNECTED
 
     def _on_connect(self, client, userdata, flags, rc):
         self._logger_mqtt.info('connected (rc=%s)', rc)
@@ -141,7 +147,7 @@ class MQTTConnector(Loggable):
 
         if isinstance(payload, (dict, list, tuple)):
             payload = json.dumps(payload)
-        self.log_info('publishing message (topic=%s payload=%s)', topic, payload[:30])
+        self.log_info('publishing message (topic=%s payload=%s)', topic, payload)
         return self._mqttc.publish(topic, payload, *args, **kwargs)
 
     @property
@@ -383,6 +389,8 @@ class ConfigurableGatewayMixin(Configurable):
                 - `username` : login
                 - `password` : guess what...
 
+            - 'simulate' : if ``true``, do not really send the data but display them instead
+
         :param dict cfg: configuration data as a dictionary
         :param logger: an optional logger which will be passed to participating Loggable instances
         :return: the MQTT connector instance, the inbound adapter, the outbound adapters
@@ -430,6 +438,7 @@ class ConfigurableGatewayMixin(Configurable):
             broker_host = cfg_broker[CFG_HOST]
             broker_port = cfg_broker.get(CFG_PORT, DEFAULT_BROKER_PORT)
             client_id = cfg_broker.get(CFG_CLIENT_ID, DEFAULT_CLIENT_ID)
+            simulate = cfg.get(CFG_SIMULATE, False)
 
             cfg_auth = cfg.get(CFG_AUTH, None)
             if cfg_auth:
@@ -451,7 +460,8 @@ class ConfigurableGatewayMixin(Configurable):
                 login=login,
                 password=password,
                 topics=listened_topics,
-                logger=None
+                logger=None,
+                simulate=simulate
             )
             return mqttc
 
@@ -471,3 +481,17 @@ class ConfigurableGatewayMixin(Configurable):
         adapter = klass()
         adapter.configure(cfg)
         return adapter
+
+
+class MQTTSimulatedClient(mqtt_client.Client, Loggable):
+    def __init__(self, logger, *args, **kwargs):
+        Loggable.__init__(self, logger)
+        self.log_warning('using a simulated connector')
+        mqtt_client.Client.__init__(self, *args, **kwargs)
+
+    def publish(self, topic, payload=None, **kwargs):
+        self.log_info('published: topic=%s payload=%s', topic, payload)
+
+    def connect(self, host, port=1883, keepalive=60, bind_address=""):
+        self.on_connect(None, None, None, mqtt_client.MQTT_ERR_SUCCESS)
+        return mqtt_client.MQTT_ERR_SUCCESS
