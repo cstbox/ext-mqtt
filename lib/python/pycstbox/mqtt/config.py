@@ -35,6 +35,7 @@ from .errors import ConfigurationError
 # Configuration dictionary keys
 
 CFG_SERVICE_OBJECT_CLASS = 'svcobj_class'
+CFG_SIMULATE = 'simulate'
 CFG_BROKER = 'broker'
 CFG_HOST = 'host'
 CFG_PORT = 'port'
