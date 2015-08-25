@@ -8,3 +8,7 @@ and [MQTT](http://mqtt.org/).
 
 This extension requires the [paho-mqtt](https://pypi.python.org/pypi/paho-mqtt) 
 library which on the target system
+
+## WARNING
+
+This is work in progress and not certified as fully working for the moment.
