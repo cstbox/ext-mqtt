@@ -16,6 +16,11 @@ follows :
             "user": "",
             "password": ""
         },
+        "tls": {
+            "ca_certs": "",
+            "certfile": "",
+            "keyfile": ""
+        },
         "adapters": {
             "inbound": <inbound_adapter_config_dictionary>,
             "outbound": <outbound_adapter_config_dictionary>
@@ -43,6 +48,10 @@ CFG_CLIENT_ID = 'client_id'
 CFG_AUTH = 'auth'
 CFG_USER = 'user'
 CFG_PASSWORD = 'password'
+CFG_TLS = 'tls'
+CFG_TLS_CA_CERTS = 'ca_certs'
+CFG_TLS_CERTFILE = 'certfile'
+CFG_TLS_KEYFILE = 'keyfile'
 CFG_ADAPTERS = 'adapters'
 CFG_INBOUND = 'inbound'
 CFG_OUTBOUND = 'outbound'
