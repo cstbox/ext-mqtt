@@ -29,13 +29,12 @@ boundary, and to translate accepted ones. Their prototypes is specified by class
 and :py:class:`OutboundFilter` provided by the package module :py:mod:`pycstbox.mqtt.core`.
 """
 
-__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
-
 import time
 import threading
 import json
 
 import dbus.service
+from dbus.exceptions import DBusException
 from paho.mqtt import client as mqtt_client
 
 from pycstbox import dbuslib
@@ -44,6 +43,8 @@ from pycstbox.log import Loggable
 
 from .core import ConfigurableGatewayMixin
 from .errors import MQTTGatewayError
+
+__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
 SERVICE_NAME = "MQTTGateway"
 
@@ -96,16 +97,17 @@ class MQTTGatewayServiceObject(dbus.service.Object, ConfigurableGatewayMixin, Lo
 
         self.configure(cfg)
 
-    def configure(self, cfg):
+    def configure(self, cfg, logger=None):
         """ Configures the service object.
 
         Consists in configuring the gateway adapters and the MQTT connector, which is then
         connected to its event handler.
 
         :param dict cfg: configuration data as a dictionary
+        :param logger: local logger
         """
         self._mqttc, self._inbound_adapter, self._outbound_adapters = \
-            ConfigurableGatewayMixin.configure(self, cfg)
+            ConfigurableGatewayMixin.configure(self, cfg, logger)
 
     def _on_message(self, client, user_data, message):
         if self._inbound_adapter:
@@ -151,7 +153,7 @@ class MQTTGatewayServiceObject(dbus.service.Object, ConfigurableGatewayMixin, Lo
         for channel, adapter in self._outbound_adapters.iteritems():
             try:
                 svc = evtmgr.get_object(channel)
-            except dbus.exceptions.DBusException as e:
+            except DBusException as e:
                 msg = "cannot connect to event channel : %s (%s)" % (channel, e)
                 self.log_error(msg)
                 raise MQTTGatewayError(msg)
