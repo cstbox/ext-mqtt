@@ -62,7 +62,7 @@ class MQTTConnector(Loggable):
         :param str client_id: optional client identification, for further exchanges tracking
         :param str login: optional authentication login
         :param str password: optional authentication password
-        :param tls: configuration for TLS if used (not used in current implementation)
+        :param tls: optional configuration for TLS if used
         :param topics: an optional list of MQTT topics to subscribe to when connected
         :param bool simulate: if True, do no perform any network operation, but trace them instead
         :param kwargs: parameters for base class
@@ -78,15 +78,22 @@ class MQTTConnector(Loggable):
         self._topics = topics or []
         self._simulate = simulate
         self._status = self.STATUS_DISCONNECTED
+        self._mqtt_loop_active = False
 
         if not simulate:
             self._mqttc = mqtt_client.Client(client_id=client_id)
             if tls:
-                self.log_info('configuration: TLS')
+                self.log_info('configuring TLS encryption')
                 self._mqttc.tls_set(**tls)
+            else:
+                self.log_warning('no communication encryption')
+
             if login:
+                self.log_info('configuring authentication')
                 self._mqttc.username_pw_set(login, password)
-                self.log_info('configuration: authentication')
+            else:
+                self.log_warning('no authentication provided')
+
         else:
             self._mqttc = MQTTSimulatedClient(logger=self.logger)
             self._status = self.STATUS_CONNECTED
@@ -117,7 +124,7 @@ class MQTTConnector(Loggable):
         self._logger_mqtt.info('connected (rc=%s)', rc)
         self._status = self.STATUS_CONNECTED if rc == mqtt_client.MQTT_ERR_SUCCESS else self.STATUS_ERROR
 
-        if self._topics:
+        if self.connected and self._topics:
             self._logger_mqtt.info("subscribing to '%s'...", self._topics)
             result, mid = self._mqttc.subscribe([(topic, 0) for topic in self._topics])
             if result == mqtt_client.MQTT_ERR_SUCCESS:
@@ -143,7 +150,10 @@ class MQTTConnector(Loggable):
         `documentation <https://pypi.python.org/pypi/paho-mqtt>`_ for details.
         """
         if not self.connected:
-            raise MQTTNotConnectedError('not connected')
+            self.log_warning('connecting before publishing the message...')
+            self._connect()
+            if not self.connected:
+                raise MQTTNotConnectedError('not connected')
 
         if isinstance(payload, (dict, list, tuple)):
             payload = json.dumps(payload)
@@ -181,6 +191,29 @@ class MQTTConnector(Loggable):
     def _on_log(self, client, userdata, level, buf):
         self._log_dispatch[level]("(client: %s) %s" % (client, buf))
 
+    def _connect(self, timeout=10, loop_delay=2):
+        if self.connected:
+            self.log_warning('connection request ignored: already connected')
+            return
+
+        self.log_info('connecting to broker at "%s:%d"...', self._broker, self._port)
+        rc = self._mqttc.connect(self._broker, self._port, self._keep_alive)
+        if rc != mqtt_client.MQTT_ERR_SUCCESS:
+            raise MQTTConnectionError(rc)
+
+        self.log_info('waiting for broker connection to be established...')
+        time_left = timeout
+        while time_left:
+            if self._status == self.STATUS_CONNECTED:
+                self.log_info('connected')
+                return
+
+            self.log_info('waiting for %d secs...' % time_left)
+            time.sleep(loop_delay)
+            time_left -= loop_delay
+
+        self.log_error('connection failed')
+
     def run(self):
         """ Starts the connector.
 
@@ -188,33 +221,38 @@ class MQTTConnector(Loggable):
         to the MQTT topics of interest (if any) is done in the :py:meth:`_on_connect` private callback,
         to avoid race conditions.
         """
-        if not self.connected:
-            self.log_info('connecting to broker at "%s:%d"...', self._broker, self._port)
-            rc = self._mqttc.connect(self._broker, self._port, self._keep_alive)
-            if rc != mqtt_client.MQTT_ERR_SUCCESS:
-                raise MQTTConnectionError(rc)
-
-            self._mqttc.loop_start()
-            self.log_info('connector loop started')
-
-            self.log_info('waiting for broker connection to be established...')
-            while self._status == self.STATUS_DISCONNECTED:
-                time.sleep(0.1)
-            self.log_info('connector successfully started')
-
-        else:
+        if self._mqtt_loop_active:
             self.log_warning('already active')
+            return
+
+        self._mqttc.loop_start()
+        self._mqtt_loop_active = True
+        self.log_info('connector loop started')
+
+        if not self.connected:
+            self.log_info('attempting first connection to MQTT broker...')
+            self._connect()
+
+        if self.connected:
+            self.log_info('connector started and online with broker')
+        else:
+            self.log_warning('connector started without broker connection')
 
     def shutdown(self):
         """ Shutdowns the connector.
         """
-        if self.connected:
-            self._mqttc.disconnect()
-            self._mqttc.loop_stop()
-            self.log_info('shutdown complete')
-
-        else:
+        if not self._mqtt_loop_active:
             self.log_warning('not currently active')
+            return
+
+        if self.connected:
+            self.log_info('disconnecting')
+            self._mqttc.disconnect()
+
+        self._mqttc.loop_stop()
+        self._mqtt_loop_active = False
+
+        self.log_info('shutdown complete')
 
 
 class ConfigurableAdapter(Configurable):
@@ -389,6 +427,13 @@ class ConfigurableGatewayMixin(Configurable):
                 - `username` : login
                 - `password` : guess what...
 
+            - `tls` : optional sub-dictionary containing the TLS related parameters
+
+                - `ca_certs` : path to the Certificate Authority certificate files that are
+                  to be treated as trusted by this client
+                - `certfile` : path to the PEM encoded client certificate
+                - `keyfile` : path to the private key
+
             - 'simulate' : if ``true``, do not really send the data but display them instead
 
         :param dict cfg: configuration data as a dictionary
@@ -447,7 +492,7 @@ class ConfigurableGatewayMixin(Configurable):
             else:
                 login = password = None
 
-            # TODO handle TLS parms et al.
+            tls = cfg.get(CFG_TLS, None)
 
         except KeyError:
             raise ValueError('invalid configuration data')
@@ -459,6 +504,7 @@ class ConfigurableGatewayMixin(Configurable):
                 client_id=client_id,
                 login=login,
                 password=password,
+                tls=tls,
                 topics=listened_topics,
                 logger=None,
                 simulate=simulate
