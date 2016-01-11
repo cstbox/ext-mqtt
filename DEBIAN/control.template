@@ -1,6 +1,6 @@
 Package: cstbox-ext-mqtt
-Version: 1.0.0
-Section: base
+Version: %(version)s
+Section: embedded
 Priority: optional
 Architecture: all
 Depends: cstbox-core(>=1.0.3), cstbox-deps-mqtt
