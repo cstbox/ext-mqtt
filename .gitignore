@@ -1,3 +1,5 @@
 cstbox-ext-mqtt*_all
 .fab_task*
 sandbox
+DEBIAN/control
+RELEASE-VERSION
