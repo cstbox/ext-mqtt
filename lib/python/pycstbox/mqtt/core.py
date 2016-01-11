@@ -22,13 +22,6 @@ wraps the connection with the MQTT broken in a convenient way, and offers the pr
 extension points for assembling the complete gateway.
 """
 
-__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
-
-__all__ = [
-    'MQTTConnector',
-    'InboundAdapter', 'OutboundAdapter'
-]
-
 import time
 import inspect
 import json
@@ -40,6 +33,13 @@ from pycstbox.evtmgr import ALL_CHANNELS
 
 from .config import *
 from .errors import MQTTConnectionError, MQTTNotConnectedError, ConfigurationError
+
+__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
+
+__all__ = [
+    'MQTTConnector',
+    'InboundAdapter', 'OutboundAdapter'
+]
 
 
 class MQTTConnector(Loggable):
@@ -199,16 +199,17 @@ class MQTTConnector(Loggable):
         self.log_info('connecting to broker at "%s:%d"...', self._broker, self._port)
         rc = self._mqttc.connect(self._broker, self._port, self._keep_alive)
         if rc != mqtt_client.MQTT_ERR_SUCCESS:
-            raise MQTTConnectionError(rc)
+            self.log_error('connection request failed (rc=%d)', rc)
+            return
 
         self.log_info('waiting for broker connection to be established...')
         time_left = timeout
         while time_left:
             if self._status == self.STATUS_CONNECTED:
-                self.log_info('connected')
+                self.log_info('... connected')
                 return
 
-            self.log_info('waiting for %d secs...' % time_left)
+            self.log_info('... time left: %d secs' % time_left)
             time.sleep(loop_delay)
             time_left -= loop_delay
 

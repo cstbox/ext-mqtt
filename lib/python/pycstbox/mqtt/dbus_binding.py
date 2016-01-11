@@ -95,7 +95,7 @@ class MQTTGatewayServiceObject(dbus.service.Object, ConfigurableGatewayMixin, Lo
 
         self._lock = threading.Lock()
 
-        self.configure(cfg)
+        self.configure(cfg, self.logger)
 
     def configure(self, cfg, logger=None):
         """ Configures the service object.

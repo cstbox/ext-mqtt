@@ -24,19 +24,23 @@ provide the list of rules, and among others, the plugable code for translating t
 both worlds.
 """
 
-__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
-
-__all__ = ['REInboundAdapter', 'REOutboundAdapter']
-
 from collections import namedtuple
 import re
 
+from pycstbox.config import GlobalSettings
 from pycstbox.events import BasicEvent
 from pycstbox.evtmgr import CONTROL_EVENT_CHANNEL, EventOnBus
 from pycstbox.log import Loggable
 from .core import InboundAdapter, OutboundAdapter
 from .errors import EventHandlerError
 from .config import *
+
+__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
+
+__all__ = ['REInboundAdapter', 'REOutboundAdapter']
+
+gs = GlobalSettings()
+system_id = gs.get('system_id')
 
 
 class RegexMixin(object):
@@ -398,8 +402,13 @@ class REOutboundAdapter(OutboundAdapter, RegexMixin, Loggable):
                 topic, payload_builder, extra = mpr
                 r = regex.match(key)
                 if r:
+                    # initialize replacement dictionary with builtin variables
+                    gd = {
+                        '__system_id__': system_id
+                    }
+                    # update it with the re capture groups
+                    gd.update(r.groupdict())
                     # computes and caches the result
-                    gd = r.groupdict()
                     topic = _replace_parms(topic, gd)
                     self._cache[key] = (topic, gd, payload_builder, extra)
 
