@@ -17,6 +17,7 @@ INIT_SEQ=94
 NAME=cstbox-mqtt
 DAEMON=/opt/cstbox/bin/mqttgwd.py
 DAEMON_ARGS=
+CAN_FAIL=yes
 INIT_VERBOSE=yes
 
 . /opt/cstbox/lib/init/init-functions
