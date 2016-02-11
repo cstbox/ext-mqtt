@@ -524,7 +524,11 @@ class ConfigurableGatewayMixin(Configurable):
         if not cfg:
             return None
 
-        klass = symbol_for_name(cfg[CFG_ADAPTER_CLASS])
+        adapter_class_name = cfg.get(CFG_ADAPTER_CLASS, "")
+        if not adapter_class_name:
+            raise ValueError("adapter class name is not configured")
+
+        klass = symbol_for_name(adapter_class_name)
         adapter = klass()
         adapter.configure(cfg)
         return adapter
