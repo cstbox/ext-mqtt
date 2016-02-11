@@ -13,5 +13,5 @@ include $(CSTBOX_DEVEL_HOME)/lib/makefile-dist.mk
 copy_files: \
 	copy_bin_files \
 	copy_python_files \
-	copy_init_scripts
-
+	copy_init_scripts \
+	copy_etc_files
