@@ -51,7 +51,7 @@ class MQTTConnector(Loggable):
     STATUS_DISCONNECTED, STATUS_CONNECTED, STATUS_ERROR = range(3)
 
     def __init__(
-            self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, topics=None,
+            self, broker, port, keep_alive=60, client_id=None, login=None, password=None, tls=None, qos=2, topics=None,
             simulate=False,
             **kwargs
     ):
@@ -77,6 +77,7 @@ class MQTTConnector(Loggable):
         self._logger_mqtt = self.logger.getChild('paho')
         self._topics = topics or []
         self._simulate = simulate
+        self._qos = qos
         self._status = self.STATUS_DISCONNECTED
         self._mqtt_loop_active = False
 
@@ -158,7 +159,7 @@ class MQTTConnector(Loggable):
         if isinstance(payload, (dict, list, tuple)):
             payload = json.dumps(payload)
         self.log_info('publishing message (topic=%s payload=%s)', topic, payload)
-        return self._mqttc.publish(topic, payload, *args, **kwargs)
+        return self._mqttc.publish(topic, payload, qos=self._qos, *args, **kwargs)
 
     @property
     def connected(self):
@@ -494,6 +495,7 @@ class ConfigurableGatewayMixin(Configurable):
                 login = password = None
 
             tls = cfg.get(CFG_TLS, None)
+            qos = cfg.get(CFG_QOS, 2)
 
         except KeyError:
             raise ValueError('invalid configuration data')
@@ -506,6 +508,7 @@ class ConfigurableGatewayMixin(Configurable):
                 login=login,
                 password=password,
                 tls=tls,
+                qos=qos,
                 topics=listened_topics,
                 logger=None,
                 simulate=simulate
