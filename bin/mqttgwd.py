@@ -41,7 +41,12 @@ if __name__ == '__main__':
         dbuslib.dbus_init()
 
         # load the gateway configuration
-        cfg = load_configuration(args.config_path)
+        if os.path.exists(args.config_path):
+            cfg = load_configuration(args.config_path)
+        else:
+            msg = "incomplete installation : configuration file is not defined"
+            logging.error(msg)
+            sys.exit(msg)
 
         # instantiate the service object
         svc_obj = cfg[CFG_SERVICE_OBJECT_CLASS](cfg)
