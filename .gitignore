@@ -3,3 +3,4 @@ cstbox-ext-mqtt*_all
 sandbox
 DEBIAN/control
 RELEASE-VERSION
+fabfile-settings.py
