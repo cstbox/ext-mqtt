@@ -28,13 +28,13 @@ follows :
     }
 """
 
-__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
-
 from json import load as json_load
 
-from pycstbox.sysutils import symbol_for_name
+from pycstbox.sysutils import symbol_for_name, CSTBOX_HOSTNAME
 
 from .errors import ConfigurationError
+
+__author__ = 'Eric Pascual - CSTB (eric.pascual@cstb.fr)'
 
 
 # Configuration dictionary keys
@@ -62,7 +62,7 @@ CFG_RULES = 'rules'
 CFG_CHANNELS = 'channels'
 
 DEFAULT_BROKER_PORT = 61613
-DEFAULT_CLIENT_ID = ""
+DEFAULT_CLIENT_ID = CSTBOX_HOSTNAME
 
 
 class Configurable(object):

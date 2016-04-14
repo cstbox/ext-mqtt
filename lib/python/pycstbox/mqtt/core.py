@@ -484,7 +484,7 @@ class ConfigurableGatewayMixin(Configurable):
             cfg_broker = cfg[CFG_BROKER]
             broker_host = cfg_broker[CFG_HOST]
             broker_port = cfg_broker.get(CFG_PORT, DEFAULT_BROKER_PORT)
-            client_id = cfg_broker.get(CFG_CLIENT_ID, DEFAULT_CLIENT_ID)
+            client_id = cfg_broker.get(CFG_CLIENT_ID, "") or DEFAULT_CLIENT_ID
             simulate = cfg.get(CFG_SIMULATE, False)
 
             cfg_auth = cfg.get(CFG_AUTH, None)
