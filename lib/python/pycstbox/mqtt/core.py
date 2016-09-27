@@ -80,6 +80,7 @@ class MQTTConnector(Loggable):
         self._qos = qos
         self._status = self.STATUS_DISCONNECTED
         self._mqtt_loop_active = False
+        self._connack_errors_count = 0
 
         if not simulate:
             self._mqttc = mqtt_client.Client(client_id=client_id)
@@ -122,10 +123,21 @@ class MQTTConnector(Loggable):
         self.user_data_set = self._mqttc.user_data_set
 
     def _on_connect(self, client, userdata, flags, rc):
-        self._logger_mqtt.info('connected (rc=%s)', rc)
-        self._status = self.STATUS_CONNECTED if rc == mqtt_client.MQTT_ERR_SUCCESS else self.STATUS_ERROR
+        if rc != mqtt_client.MQTT_ERR_SUCCESS:
+            if self._connack_errors_count <= 2:
+                suffixes = ['', ' (repeated)', ' (last notification)']
+                self._logger_mqtt.error('CONNACK received with rc=%d%s', rc, suffixes[self._connack_errors_count])
+                self._connack_errors_count += 1
+            self._status = self.STATUS_ERROR
+            return
 
-        if self.connected and self._topics:
+        self._status = self.STATUS_CONNECTED
+        self._logger_mqtt.info('connected')
+
+        # reset error report pacing
+        self._connack_errors_count = 0
+
+        if self._topics:
             self._logger_mqtt.info("subscribing to '%s'...", self._topics)
             result, mid = self._mqttc.subscribe([(topic, 0) for topic in self._topics])
             if result == mqtt_client.MQTT_ERR_SUCCESS:
@@ -135,8 +147,9 @@ class MQTTConnector(Loggable):
                 self._logger_mqtt.error('... failed')
 
     def _on_disconnect(self, client, userdata, rc):
-        self._logger_mqtt.info('disconnected')
-        self._status = self.STATUS_DISCONNECTED
+        if self.connected:
+            self._logger_mqtt.info('disconnected')
+            self._status = self.STATUS_DISCONNECTED
 
     def publish(self, topic, payload, *args, **kwargs):
         """ Publish a message on MQTT.
@@ -205,7 +218,7 @@ class MQTTConnector(Loggable):
 
         self.log_info('waiting for broker connection to be established...')
         time_left = timeout
-        while time_left:
+        while time_left >= 0:
             if self._status == self.STATUS_CONNECTED:
                 self.log_info('... connected')
                 return
