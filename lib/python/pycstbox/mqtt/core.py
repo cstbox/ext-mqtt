@@ -132,7 +132,7 @@ class MQTTConnector(Loggable):
             return
 
         self._status = self.STATUS_CONNECTED
-        self._logger_mqtt.info('connected')
+        self._logger_mqtt.info('CONNACK received with rc=0')
 
         # reset error report pacing
         self._connack_errors_count = 0

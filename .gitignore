@@ -4,3 +4,4 @@ sandbox
 DEBIAN/control
 RELEASE-VERSION
 fabfile-settings.py
+fabfile.py
